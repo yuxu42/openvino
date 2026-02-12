@@ -250,6 +250,8 @@ private:
     Vmm vmm_zero = Vmm(0);  // vmm_zero represents Vmm(0) when isa is avx512_core, otherwise vmm_mask represents Vmm(0)
 
     const Xbyak::Opmask k_mask = Xbyak::Opmask(1);
+    const Xbyak::Opmask k_mask_tmp = Xbyak::Opmask(2);
+    const Xbyak::Opmask k_mask_tmp2 = Xbyak::Opmask(3);
     const int vector_step = vlen / sizeof(float);
     const int tail_step = jcp_.work_amount % vector_step;
 
@@ -878,7 +880,19 @@ private:
         if (isa == cpu::x64::avx512_core) {
             if (cmp_val) {
                 if (isFloatCompatible(data_type)) {
-                    vcmpps(k_mask, xmm_val_a, xmm_val_b, val_cmp_flg);
+                    const unsigned char cmp_unord = 0x03;  // _CMP_UNORD_Q
+                    if (val_cmp_flg == _cmp_nle_us) {
+                        // Ordered compare for a > b (min-TopK) to avoid unordered NaN behavior.
+                        vcmpps(k_mask, xmm_val_b, xmm_val_a, _cmp_lt_os);
+                    } else {
+                        // Ordered compare for a < b (max-TopK).
+                        vcmpps(k_mask, xmm_val_a, xmm_val_b, val_cmp_flg);
+                    }
+                    // Treat NaN as the worst candidate: swap only when a is NaN and b is not.
+                    vcmpps(k_mask_tmp, xmm_val_a, xmm_val_a, cmp_unord);   // isnan(a)
+                    vcmpps(k_mask_tmp2, xmm_val_b, xmm_val_b, cmp_unord);  // isnan(b)
+                    kandnw(k_mask_tmp, k_mask_tmp2, k_mask_tmp);           // isnan(a) & ~isnan(b)
+                    korw(k_mask, k_mask, k_mask_tmp);
                 } else {
                     vpcmpd(k_mask, xmm_val_a, xmm_val_b, val_cmp_flg);
                 }
@@ -888,7 +902,19 @@ private:
         } else {
             if (cmp_val) {
                 if (isFloatCompatible(data_type)) {
-                    uni_vcmpps(mask, xmm_val_a, xmm_val_b, val_cmp_flg);
+                    const unsigned char cmp_unord = 0x03;  // _CMP_UNORD_Q
+                    // Build NaN mask first: isnan(a) & ~isnan(b)
+                    uni_vcmpps(mask, xmm_val_b, xmm_val_b, cmp_unord);   // nan_b
+                    uni_vcmpps(xmm_tmp, xmm_val_a, xmm_val_a, cmp_unord);  // nan_a
+                    andnps(mask, xmm_tmp);  // mask = ~nan_b & nan_a
+
+                    // Ordered compare for values
+                    if (val_cmp_flg == _cmp_nle_us) {
+                        uni_vcmpps(xmm_tmp, xmm_val_b, xmm_val_a, _cmp_lt_os);  // a > b
+                    } else {
+                        uni_vcmpps(xmm_tmp, xmm_val_a, xmm_val_b, val_cmp_flg);  // a < b
+                    }
+                    orps(mask, xmm_tmp);
                 } else {
                     if (val_cmp_flg == _cmp_nle_us) {
                         uni_vpcmpgtd(mask, xmm_val_a, xmm_val_b);
@@ -2233,6 +2259,24 @@ void TopK::execute([[maybe_unused]] const dnnl::stream& strm) {
     auto* dst_idx = dstIndexesMemPtr->getDataAs<uint8_t>();
 
     if (jit_mode) {
+        // Fallback to reference path for NaN-sensitive float inputs to ensure consistent ArgMin/ArgMax results.
+        if (layout == TopKLayoutType::topk_ncsp && top_k == 1 && srcMemPtr->getDesc().getPrecision() == ov::element::f32) {
+            const auto* in_ptr = reinterpret_cast<const float*>(src_data);
+            const auto elements_count = static_cast<size_t>(count(src_dims));
+            bool has_nan = false;
+            for (size_t i = 0; i < elements_count; ++i) {
+                if (std::isnan(in_ptr[i])) {
+                    has_nan = true;
+                    break;
+                }
+            }
+            if (has_nan) {
+                auto* out_ptr = reinterpret_cast<float*>(dst_data);
+                auto* out_idx_ptr = reinterpret_cast<int32_t*>(dst_idx);
+                topk_ref(in_ptr, out_ptr, out_idx_ptr);
+                return;
+            }
+        }
         topk_process(src_data, dst_data, dst_idx);
     } else {
         if (layout == TopKLayoutType::topk_ncsp) {
@@ -2489,6 +2533,16 @@ void TopK::topk_ref_process(const float* src_data,
     const auto& cpu_parallel = context->getCpuParallel();
     int after_num = count(in_dims, axis + 1, in_dims.size());
 
+    auto better = [&](float x, float y) -> bool {
+        if (std::isnan(x)) {
+            return false;
+        }
+        if (std::isnan(y)) {
+            return true;
+        }
+        return compare(x, y);
+    };
+
     cpu_parallel->parallel_for2d(before_num, after_num, [&](int i0, int i1) {
         std::vector<float> max_values(top_k + 1);
         std::vector<int> max_indexes(top_k + 1);
@@ -2511,7 +2565,7 @@ void TopK::topk_ref_process(const float* src_data,
         }
         for (int i2 = 0; i2 < top_k - 1; i2++) {
             for (int i3 = top_k - 1; i3 > i2; i3--) {
-                if (compare(max_values[i3], max_values[i3 - 1])) {
+                if (better(max_values[i3], max_values[i3 - 1])) {
                     swap_func(i3, i3 - 1);
                 }
             }
@@ -2520,7 +2574,7 @@ void TopK::topk_ref_process(const float* src_data,
             max_values[top_k] = src_data[s_index];
             max_indexes[top_k] = i2;
             for (int i3 = top_k; i3 > 0; i3--) {
-                if (compare(max_values[i3], max_values[i3 - 1])) {
+                if (better(max_values[i3], max_values[i3 - 1])) {
                     swap_func(i3, i3 - 1);
                 } else {
                     break;

@@ -4,11 +4,15 @@
 
 #include "utils/arg_min_max_factory.hpp"
 
+#include <limits>
+
 #include "openvino/core/validation_util.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/gather.hpp"
+#include "openvino/op/is_nan.hpp"
 #include "openvino/op/reverse.hpp"
+#include "openvino/op/select.hpp"
 #include "openvino/op/shape_of.hpp"
 #include "openvino/op/squeeze.hpp"
 #include "openvino/op/subtract.hpp"
@@ -38,6 +42,16 @@ ov::Output<ov::Node> ArgMinMaxFactory::make_arg_min() const {
 
 ov::Output<ov::Node> ArgMinMaxFactory::make_topk_subgraph(v11::TopK::Mode mode) const {
     const auto k_node = v0::Constant::create(ov::element::i64, ov::Shape{}, {1});
+    ov::Output<ov::Node> input = m_input_node;
+
+    if (input.get_element_type().is_real()) {
+        const auto nan_mask = std::make_shared<v10::IsNaN>(input);
+        const auto inf_value = (mode == v11::TopK::Mode::MIN)
+                                   ? std::numeric_limits<float>::infinity()
+                                   : -std::numeric_limits<float>::infinity();
+        const auto inf_const = v0::Constant::create(input.get_element_type(), ov::Shape{1}, {inf_value});
+        input = std::make_shared<v1::Select>(nan_mask, inf_const, input);
+    }
 
     if (m_select_last_index == 1) {
         // Example (ArgMin):
@@ -68,7 +82,7 @@ ov::Output<ov::Node> ArgMinMaxFactory::make_topk_subgraph(v11::TopK::Mode mode) 
             ov::util::try_normalize_axis(m_axis, m_input_node.get_partial_shape().rank(), *m_input_node.get_node());
 
         const auto axis_node = v0::Constant::create(ov::element::i64, ov::Shape{1}, {normalized_axis});
-        const auto reverse = std::make_shared<v1::Reverse>(m_input_node, axis_node, v1::Reverse::Mode::INDEX);
+        const auto reverse = std::make_shared<v1::Reverse>(input, axis_node, v1::Reverse::Mode::INDEX);
 
         const auto topk = std::make_shared<v11::TopK>(reverse,
                                                       k_node,
@@ -97,7 +111,7 @@ ov::Output<ov::Node> ArgMinMaxFactory::make_topk_subgraph(v11::TopK::Mode mode) 
         return {result};
     }
 
-    const auto topk = std::make_shared<v11::TopK>(m_input_node,
+    const auto topk = std::make_shared<v11::TopK>(input,
                                                   k_node,
                                                   m_axis,
                                                   mode,
