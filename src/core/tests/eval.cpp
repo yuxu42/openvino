@@ -43,6 +43,7 @@
 #include "openvino/op/minimum.hpp"
 #include "openvino/op/negative.hpp"
 #include "openvino/op/parameter.hpp"
+#include "openvino/op/prelu.hpp"
 #include "openvino/op/range.hpp"
 #include "openvino/op/reduce_min.hpp"
 #include "openvino/op/relu.hpp"
@@ -4273,4 +4274,69 @@ TEST(eval, evaluate_concat_string_basic) {
 
     const auto result_const = ov::op::v0::Constant(out_vector.at(0));
     EXPECT_EQ(out_expected, result_const.get_value_strings());
+}
+
+// Test PRelu with scalar input (rank=0)
+TEST(eval, evaluate_prelu_scalar) {
+    auto data = make_shared<ov::op::v0::Constant>(element::f32, Shape{}, std::vector<float>{-2.0f});
+    auto slope = make_shared<ov::op::v0::Constant>(element::f32, Shape{1}, std::vector<float>{0.1f});
+    auto prelu = make_shared<op::v0::PRelu>(data, slope);
+    auto model = make_shared<ov::Model>(OutputVector{prelu}, ParameterVector{});
+
+    auto result = ov::Tensor();
+    auto out_vector = ov::TensorVector{result};
+    auto in_vector = ov::TensorVector{};
+
+    ASSERT_TRUE(model->evaluate(out_vector, in_vector));
+    EXPECT_EQ(result.get_element_type(), element::f32);
+    EXPECT_EQ(result.get_shape(), Shape{});
+
+    auto result_data = read_vector<float>(result);
+    ASSERT_EQ(result_data.size(), 1);
+    EXPECT_FLOAT_EQ(result_data[0], -0.2f);  // -2.0 * 0.1 = -0.2
+}
+
+// Test PRelu with 1D input
+TEST(eval, evaluate_prelu_1d) {
+    auto data = make_shared<ov::op::v0::Constant>(element::f32, Shape{3}, std::vector<float>{-1.0f, 2.0f, -3.0f});
+    auto slope = make_shared<ov::op::v0::Constant>(element::f32, Shape{1}, std::vector<float>{0.1f});
+    auto prelu = make_shared<op::v0::PRelu>(data, slope);
+    auto model = make_shared<ov::Model>(OutputVector{prelu}, ParameterVector{});
+
+    auto result = ov::Tensor();
+    auto out_vector = ov::TensorVector{result};
+    auto in_vector = ov::TensorVector{};
+
+    ASSERT_TRUE(model->evaluate(out_vector, in_vector));
+    EXPECT_EQ(result.get_element_type(), element::f32);
+    EXPECT_EQ(result.get_shape(), (Shape{3}));
+
+    auto result_data = read_vector<float>(result);
+    ASSERT_EQ(result_data.size(), 3);
+    EXPECT_FLOAT_EQ(result_data[0], -0.1f);  // -1.0 * 0.1 = -0.1
+    EXPECT_FLOAT_EQ(result_data[1], 2.0f);   // positive values unchanged
+    EXPECT_FLOAT_EQ(result_data[2], -0.3f);  // -3.0 * 0.1 = -0.3
+}
+
+// Test PRelu with typical 4D input (like LeakyRelu from the issue)
+TEST(eval, evaluate_prelu_4d) {
+    auto data = make_shared<ov::op::v0::Constant>(element::f32, Shape{1, 3, 1, 1}, 
+                                                   std::vector<float>{-1498.9546f, -1499.4641f, -1499.3304f});
+    auto slope = make_shared<ov::op::v0::Constant>(element::f32, Shape{1}, std::vector<float>{0.01f});
+    auto prelu = make_shared<op::v0::PRelu>(data, slope);
+    auto model = make_shared<ov::Model>(OutputVector{prelu}, ParameterVector{});
+
+    auto result = ov::Tensor();
+    auto out_vector = ov::TensorVector{result};
+    auto in_vector = ov::TensorVector{};
+
+    ASSERT_TRUE(model->evaluate(out_vector, in_vector));
+    EXPECT_EQ(result.get_element_type(), element::f32);
+    EXPECT_EQ(result.get_shape(), (Shape{1, 3, 1, 1}));
+
+    auto result_data = read_vector<float>(result);
+    ASSERT_EQ(result_data.size(), 3);
+    EXPECT_NEAR(result_data[0], -14.989546f, 0.0001f);  // -1498.9546 * 0.01
+    EXPECT_NEAR(result_data[1], -14.994641f, 0.0001f);  // -1499.4641 * 0.01
+    EXPECT_NEAR(result_data[2], -14.993304f, 0.0001f);  // -1499.3304 * 0.01
 }
