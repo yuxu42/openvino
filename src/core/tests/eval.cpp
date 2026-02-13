@@ -4320,7 +4320,7 @@ TEST(eval, evaluate_prelu_1d) {
 
 // Test PRelu with typical 4D input (like LeakyRelu from the issue)
 TEST(eval, evaluate_prelu_4d) {
-    auto data = make_shared<ov::op::v0::Constant>(element::f32, Shape{1, 3, 1, 1}, 
+    auto data = make_shared<ov::op::v0::Constant>(element::f32, Shape{1, 3, 1, 1},
                                                    std::vector<float>{-1498.9546f, -1499.4641f, -1499.3304f});
     auto slope = make_shared<ov::op::v0::Constant>(element::f32, Shape{1}, std::vector<float>{0.01f});
     auto prelu = make_shared<op::v0::PRelu>(data, slope);
