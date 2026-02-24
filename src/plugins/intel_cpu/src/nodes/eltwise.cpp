@@ -779,6 +779,14 @@ bool Eltwise::canFuse(const NodePtr& node) const {
             return false;
         }
 
+        // Keep Add -> Ceiling chains in low precision as separate nodes.
+        // Fusing may change intermediate rounding behavior around exact integer boundaries and
+        // lead to +1 result deviation (see issue #33234).
+        if (any_of(node->getAlgorithm(), Algorithm::EltwiseCeiling) &&
+            any_of(node->getOriginalInputPrecisionAtPort(0), ov::element::f16, ov::element::bf16)) {
+            return false;
+        }
+
         if (node->getParentEdgeAt(0)->getParent().get() != this) {
             // Eltwise jitter doesn't respect commutative property, so fusing is disabled in case it applied not for
             // 0-th port.
