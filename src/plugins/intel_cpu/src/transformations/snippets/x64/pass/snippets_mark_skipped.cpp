@@ -26,6 +26,7 @@
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/convolution.hpp"
+#include "openvino/op/ceiling.hpp"
 #include "openvino/op/divide.hpp"
 #include "openvino/op/elu.hpp"
 #include "openvino/op/fake_quantize.hpp"
@@ -567,6 +568,58 @@ bool isSuitableConvert(const std::shared_ptr<const Node>& node) {
     return false;
 }
 
+bool has_low_precision_convert(const std::shared_ptr<const Node>& node) {
+    if (!ov::is_type<ov::op::v0::Convert>(node)) {
+        return false;
+    }
+
+    const auto in_prc = node->get_input_element_type(0);
+    const auto out_prc = node->get_output_element_type(0);
+    return any_of(in_prc, element::f16, element::bf16) || any_of(out_prc, element::f16, element::bf16);
+}
+
+bool has_low_precision_convert_inputs(const std::shared_ptr<const Node>& node) {
+    for (size_t i = 0; i < node->get_input_size(); ++i) {
+        if (has_low_precision_convert(node->get_input_node_shared_ptr(i))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool is_add_ceil_low_precision_chain(const std::shared_ptr<const Node>& node) {
+    if (!ov::is_type<ov::op::v0::Ceiling>(node)) {
+        return false;
+    }
+
+    const auto parent = node->get_input_node_shared_ptr(0);
+    if (!ov::is_type<ov::op::v1::Add>(parent)) {
+        return false;
+    }
+
+    const auto in_prc = node->get_input_element_type(0);
+    const auto out_prc = node->get_output_element_type(0);
+    if (any_of(in_prc, element::f16, element::bf16) || any_of(out_prc, element::f16, element::bf16)) {
+        return true;
+    }
+
+    if (has_low_precision_convert_inputs(node) || has_low_precision_convert(parent)) {
+        return true;
+    }
+
+    for (size_t i = 0; i < parent->get_input_size(); ++i) {
+        if (any_of(parent->get_input_element_type(i), element::f16, element::bf16)) {
+            return true;
+        }
+    }
+
+    if (has_low_precision_convert_inputs(parent)) {
+        return true;
+    }
+
+    return false;
+}
+
 auto is_skipped_op(const std::shared_ptr<ov::Node>& op) -> bool {
     return ov::is_type_any_of<ov::op::v0::Constant, ov::op::v0::Parameter, ov::op::v0::Result>(op);
 }
@@ -577,6 +630,13 @@ bool SnippetsMarkSkipped::run_on_model(const std::shared_ptr<ov::Model>& m) {
     int channelAxis = DEFAULT_AXIS;
     for (auto& node : m->get_ordered_ops()) {
         if (is_skipped_op(node)) {
+            continue;
+        }
+
+        if (is_add_ceil_low_precision_chain(node)) {
+            // Keep Add -> Ceil chains in low precision out of snippets to preserve intermediate rounding
+            // semantics (issue #33234).
+            SetSnippetsNodeType(node, snippets::pass::SnippetsNodeType::SkippedByPlugin);
             continue;
         }
         // We perform this check separately because we mark here only weights path

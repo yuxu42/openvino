@@ -139,6 +139,7 @@
 
 // CPU specific transformations
 #include "transformations/cpu_opset/common/pass/insert_convert_after_extension.hpp"
+#include "transformations/cpu_opset/common/pass/insert_convert_before_ceil.hpp"
 #include "transformations/cpu_opset/common/pass/ngram_fusion.hpp"
 #include "transformations/cpu_opset/common/pass/permute_slice_n_interpolation.hpp"
 #include "transformations/cpu_opset/common/pass/stateful_sdpa_fusion.hpp"
@@ -659,6 +660,7 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
 
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::EliminateConvert);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::EliminateIdentityConvert);
+    CPU_REGISTER_PASS_COMMON(manager, ov::intel_cpu::InsertConvertBeforeCeil);
     CPU_REGISTER_PASS_COMMON(manager, SwapConvertTranspose);
     CPU_REGISTER_PASS_X64(manager, ConvertToInteraction);
     CPU_REGISTER_PASS_X64(manager, ConvertInteractionInt8);
