@@ -15,6 +15,7 @@
 #include "common/pass/convert_to_swish_cpu.hpp"
 #include "common/pass/fc_bias_fusion.hpp"
 #include "common/pass/move_fc_reshape_to_weights.hpp"
+#include "common/pass/mark_sincos_phase_to_keep_in_mixed_precision.hpp"
 #include "common/pass/move_readvalue_inputs_to_subgraph.hpp"
 #include "common/pass/rnn_sequences_optimization.hpp"
 #include "config.h"
@@ -117,6 +118,17 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ov::Model>& model, const C
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::Validate);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::EliminateConvert);  // Need to clean up after the ConvertPrecision.
     CPU_REGISTER_PASS_COMMON(manager, MoveReadValueInputsToSubgraph);
+
+    // Markup Sin/Cos whose phase argument is produced by a CumSum (an unbounded phase
+    // accumulator, e.g. NSF/source-filter vocoders like kokoro) to keep that path in FP32.
+    // Registered at the very end of the CPU-specific opset conversion, after PowerStatic
+    // conversion and transpose optimizations, because the DisablePrecisionConversion marker
+    // is non-copyable and would otherwise be dropped when those passes replace the eltwise
+    // nodes on the phase path.
+    if (config.inferencePrecision == ov::element::bf16 || config.inferencePrecision == ov::element::f16) {
+        CPU_REGISTER_PASS_COMMON(manager, MarkSinCosPhaseToKeepInMixedPrecision);
+    }
+
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::Validate);
 
     manager.run_passes(model);
