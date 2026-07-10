@@ -27,6 +27,12 @@ NamedOutputs expand_v2(const NodeContext& node) {
             PADDLE_OP_CHECK(node,
                             input.get_partial_shape().rank().get_length() == 1,
                             "the rank of conv input must == 1");
+            // Each expand_shapes_tensor entry represents one target dimension. Extract that
+            // scalar explicitly because its tensor length can become dynamic after a surrounding
+            // control-flow operation is revalidated.
+            auto zero = default_opset::Constant::create(ov::element::i32, {}, {0});
+            auto scalar = std::make_shared<default_opset::Gather>(input, zero, zero);
+            input = std::make_shared<default_opset::Unsqueeze>(scalar, zero);
             auto cast = std::make_shared<Convert>(input, element::i32);
             node_vec.emplace_back(cast);
         }
